@@ -1,0 +1,23 @@
+{
+  "name": "ollama-inline-completion",
+  "displayName": "Ollama Inline Completion",
+  "description": "Copilot-style ghost text using Ollama + Qwen2.5-Coder",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["AI"],
+  "activationEvents": ["*"],
+  "main": "./out/extension.js",
+  "contributes": {},
+  "scripts": {
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "esbuild": "^0.20.0",
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0"
+  }
+}
