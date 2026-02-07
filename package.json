@@ -16,7 +16,7 @@
         {
           "id": "axiom-sidebar",
           "title": "Axiom",
-          "icon": "assets/sidebar-icon.svg"
+          "icon": "icon.svg"
         }
       ]
     },
