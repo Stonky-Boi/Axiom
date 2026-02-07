@@ -132,12 +132,9 @@ class Agent:
             return "Axiom could not explain this symbol."
 
     def chat(self, user_input: str) -> Generator[Dict[str, Any], None, None]:
-        """
-        The 'Reasoning Loop' with Leaked-JSON Detection
-        """
         self.memory.add_message("user", user_input)
-
         retries = 0
+        
         while retries < 3:
             try:
                 response = self.client.chat.completions.create(
@@ -153,13 +150,11 @@ class Agent:
                 content = message.content or ""
                 tool_calls = message.tool_calls
 
-                # --- LEAK DETECTOR ---
-                # Check if model output raw JSON in content instead of tool_calls
+                # [Leak Detector: Recover JSON if model output text instead of tool_call]
                 if not tool_calls and content.strip().startswith("{") and "name" in content:
                     try:
                         data = json.loads(content)
                         if "name" in data and "arguments" in data:
-                            # Manually construct the missing tool structure
                             from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall, Function
                             tool_calls = [
                                 ChatCompletionMessageToolCall(
@@ -168,35 +163,38 @@ class Agent:
                                     type="function"
                                 )
                             ]
-                            # Clear content to avoid printing JSON to user
-                            message.content = None 
-                    except Exception:
-                        pass # Not valid JSON, process as text
+                            message.content = None # Suppress the raw JSON text
+                    except: pass
 
-                # Case 1: Tool Usage (Native or Recovered)
                 if tool_calls:
                     self.memory.add_tool_calls(message)
                     
                     for tool in tool_calls:
-                        func_name = tool.function.name #type: ignore
+                        func_name = tool.function.name # type: ignore
                         call_id = tool.id
                         
                         yield {"type": "info", "content": f"Running tool: {func_name}..."}
 
                         try:
-                            args_raw = tool.function.arguments #type: ignore
-                            if isinstance(args_raw, str):
-                                args = json.loads(args_raw)
-                            else:
-                                args = args_raw
-
+                            args_raw = tool.function.arguments # type: ignore
+                            args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
                             result = execute_tool_call(func_name, args)
+                            
+                            # --- FIX: PASS UI COMPONENTS TO FRONTEND ---
+                            # If the tool returned a special UI packet (like a Diff), yield it now.
+                            if "__axiom_type__" in result:
+                                try:
+                                    # We yield it as a 'component' type so frontend handles it specially
+                                    json_res = json.loads(result)
+                                    yield {"type": "component", "data": json_res}
+                                except: pass
+                            # -------------------------------------------
+
                         except Exception as tool_err:
                             result = f"Tool Error: {str(tool_err)}"
 
                         self.memory.add_message("tool", result, tool_call_id=call_id)
 
-                # Case 2: Final Answer
                 else:
                     self.memory.add_message("assistant", content)
                     yield {"type": "answer", "content": content}

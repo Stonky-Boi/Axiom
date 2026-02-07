@@ -1,48 +1,49 @@
 import * as vscode from "vscode";
 import { AxiomClient } from "./client";
-import { InlineCompletionFeature } from "./features/inline";
 import { HoverFeature } from "./features/hover";
 import { ChatFeature } from "./features/chat";
+import { InlineCompletionProvider } from "./features/inline/completionProvider";
 
 const LANGUAGE_SELECTOR = [
     { language: "python", scheme: "file" },
     { language: "c", scheme: "file" },
-    { language: "cpp", scheme: "file" }
+    { language: "cpp", scheme: "file" },
+    { language: "javascript", scheme: "file" },
+    { language: "typescript", scheme: "file" }
 ];
 
 export function activate(context: vscode.ExtensionContext) {
-    console.log("Axiom (Refactored) Activated");
+    console.log("Axiom Activated");
 
-    try {
-        // 1. Initialize Client (Starts Python Server)
-        const client = new AxiomClient(context);
-        context.subscriptions.push(vscode.Disposable.from(client));
+    const client = new AxiomClient(context);
+    context.subscriptions.push(vscode.Disposable.from(client));
 
-        // 2. Register Inline Completion (Fast Loop)
-        const inline_provider = new InlineCompletionFeature(client);
-        context.subscriptions.push(
-            vscode.languages.registerInlineCompletionItemProvider(
-                LANGUAGE_SELECTOR,
-                inline_provider
-            )
-        );
+    // Inline
+    const inlineProvider = new InlineCompletionProvider();
+    context.subscriptions.push(
+        vscode.languages.registerInlineCompletionItemProvider(
+            { pattern: "**" }, 
+            inlineProvider
+        )
+    );
 
-        // 3. Register Hover Provider (Explanation Loop)
-        const hover_provider = new HoverFeature(client);
-        context.subscriptions.push(
-            vscode.languages.registerHoverProvider(
-                LANGUAGE_SELECTOR,
-                hover_provider
-            )
-        );
+    // Sidebar Chat
+    const chatProvider = new ChatFeature(context.extensionUri, client);
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider(ChatFeature.viewType, chatProvider)
+    );
 
-        // 4. Register Chat Commands (Reasoning Loop)
-        new ChatFeature(context, client);
+    // Hover
+    context.subscriptions.push(
+        vscode.languages.registerHoverProvider(LANGUAGE_SELECTOR, new HoverFeature(client))
+    );
 
-    } catch (error) {
-        console.error("Failed to activate Axiom:", error);
-        vscode.window.showErrorMessage("Axiom failed to start. Check the output console.");
-    }
+    // Commands
+    context.subscriptions.push(
+        vscode.commands.registerCommand('axiom.focusChat', () => {
+             vscode.commands.executeCommand('axiom.chatView.focus');
+        })
+    );
 }
 
 export function deactivate() {}

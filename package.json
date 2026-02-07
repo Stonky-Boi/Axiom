@@ -1,24 +1,39 @@
 {
   "name": "axiom",
   "displayName": "Axiom",
-  "description": "Editor-native AI with isolated interaction loops.",
-  "version": "0.1.0",
+  "description": "Editor-native Assistant. Fast, Predictable, Local.",
+  "version": "0.2.0",
   "engines": {
-    "vscode": "^1.95.0"
+    "vscode": "^1.80.0"
   },
-  "categories": [
-    "Programming Languages",
-    "Machine Learning"
-  ],
   "activationEvents": [
     "onStartupFinished"
   ],
   "main": "./dist/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "axiom-sidebar",
+          "title": "Axiom",
+          "icon": "assets/sidebar-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "axiom-sidebar": [
+        {
+          "type": "webview",
+          "id": "axiom.chatView",
+          "icon": "icon.svg",
+          "name": "Chat"
+        }
+      ]
+    },
     "commands": [
       {
-        "command": "axiom.chat",
-        "title": "Axiom: Chat",
+        "command": "axiom.focusChat",
+        "title": "Axiom: Open Chat",
         "category": "Axiom"
       }
     ],
@@ -28,12 +43,7 @@
         "axiom.pythonPath": {
           "type": "string",
           "default": "python",
-          "description": "Path to the Python interpreter used for the Axiom backend."
-        },
-        "axiom.enableGhostText": {
-          "type": "boolean",
-          "default": true,
-          "description": "Enable inline ghost text completions."
+          "description": "Path to the Python interpreter."
         }
       }
     }
@@ -50,14 +60,15 @@
     "test": "vscode-test"
   },
   "devDependencies": {
-    "@types/vscode": "^1.95.0",
-    "@types/node": "^20.x",
-    "typescript-eslint": "^8.10.0",
-    "eslint": "^9.13.0",
-    "esbuild": "^0.23.1",
+    "@types/vscode": "^1.80.0",
+    "@types/node": "^18.x",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "esbuild": "^0.19.0",
     "npm-run-all": "^4.1.5",
-    "typescript": "^5.6.3",
-    "@vscode/test-cli": "^0.0.9",
-    "@vscode/test-electron": "^2.4.1"
+    "typescript": "^5.0.0",
+    "@vscode/test-cli": "^0.0.4",
+    "@vscode/test-electron": "^2.3.8"
   }
 }
