@@ -57,12 +57,24 @@ class AxiomServer:
             }
         
         elif command == "chat":
-            response_gen = self.agent.chat(data.get("prompt"))
-            full_response = ""
-            for event in response_gen:
-                if event["type"] == "answer":
-                    full_response += event["content"]
-            return {"response": full_response}
+            text_buffer = ""
+            components = []
+            
+            generator = self.agent.chat(data.get("prompt"))
+            
+            for event in generator:
+                if event["type"] == "text":
+                    text_buffer += event["content"]
+                elif event["type"] == "component":
+                    components.append(event["data"])
+                elif event["type"] == "error":
+                    text_buffer += f"\n[Error: {event['content']}]"
+
+            # Return structure: { response: string, components: array }
+            return {
+                "response": text_buffer,
+                "components": components
+            }
 
         elif command == "hover":
             return {

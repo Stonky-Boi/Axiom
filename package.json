@@ -33,7 +33,7 @@
     "commands": [
       {
         "command": "axiom.focusChat",
-        "title": "Axiom: Open Chat",
+        "title": "Open Chat",
         "category": "Axiom"
       }
     ],

@@ -132,77 +132,77 @@ class Agent:
             return "Axiom could not explain this symbol."
 
     def chat(self, user_input: str) -> Generator[Dict[str, Any], None, None]:
+        """
+        Rewritten Chat Loop:
+        - Yields {"type": "text", "content": "..."} for LLM speech.
+        - Yields {"type": "component", "data": {...}} for UI widgets (Diffs).
+        """
         self.memory.add_message("user", user_input)
-        retries = 0
         
-        while retries < 3:
-            try:
-                response = self.client.chat.completions.create(
-                    model=Config.MODEL_ID,
-                    messages=self.memory.get_messages(), # type: ignore
-                    tools=self.tools, # type: ignore
-                    tool_choice="auto",
-                    max_tokens=Config.MAX_OUTPUT_TOKENS,
-                    temperature=0.1
-                )
+        try:
+            response = self.client.chat.completions.create(
+                model=Config.MODEL_ID,
+                messages=self.memory.get_messages(), # type: ignore
+                tools=self.tools, # type: ignore
+                tool_choice="auto",
+                max_tokens=Config.MAX_OUTPUT_TOKENS,
+                temperature=0.1
+            )
+            
+            message = response.choices[0].message
+            content = message.content or ""
+            tool_calls = message.tool_calls
+
+            # 1. Handle Normal Text Response
+            if content:
+                self.memory.add_message("assistant", content)
+                yield {"type": "text", "content": content}
+
+            # 2. Handle Tool Calls
+            if tool_calls:
+                self.memory.add_tool_calls(message)
                 
-                message = response.choices[0].message
-                content = message.content or ""
-                tool_calls = message.tool_calls
+                for tool in tool_calls:
+                    func_name = tool.function.name #type: ignore
+                    call_id = tool.id
+                    args_str = tool.function.arguments #type: ignore
 
-                # [Leak Detector: Recover JSON if model output text instead of tool_call]
-                if not tool_calls and content.strip().startswith("{") and "name" in content:
+                    # Yield 'info' to show spinner/status on frontend
+                    yield {"type": "info", "content": f"Running {func_name}..."}
+
                     try:
-                        data = json.loads(content)
-                        if "name" in data and "arguments" in data:
-                            from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall, Function
-                            tool_calls = [
-                                ChatCompletionMessageToolCall(
-                                    id="call_" + str(int(time.time())),
-                                    function=Function(name=data["name"], arguments=json.dumps(data["arguments"])),
-                                    type="function"
-                                )
-                            ]
-                            message.content = None # Suppress the raw JSON text
-                    except: pass
-
-                if tool_calls:
-                    self.memory.add_tool_calls(message)
-                    
-                    for tool in tool_calls:
-                        func_name = tool.function.name # type: ignore
-                        call_id = tool.id
+                        # Parse Arguments
+                        args = json.loads(args_str) if isinstance(args_str, str) else args_str
                         
-                        yield {"type": "info", "content": f"Running tool: {func_name}..."}
+                        # Execute Tool
+                        raw_result = execute_tool_call(func_name, args)
+                        
+                        # --- INTERCEPTION LAYER ---
+                        # Check if tool returned a UI Component (e.g. Diff)
+                        is_component = False
+                        if "__axiom_type__" in raw_result:
+                            try:
+                                component_data = json.loads(raw_result)
+                                if component_data.get("__axiom_type__") == "diff":
+                                    # A. Send Component to Frontend
+                                    yield {"type": "component", "data": component_data}
+                                    
+                                    # B. sanitize Memory (CRITICAL FIX)
+                                    # Do NOT save the huge JSON to memory. The LLM will just repeat it.
+                                    # Save a summary instead.
+                                    self.memory.add_message("tool", "Diff generated and displayed to user.", tool_call_id=call_id)
+                                    is_component = True
+                            except:
+                                pass # parsing failed, treat as normal text
 
-                        try:
-                            args_raw = tool.function.arguments # type: ignore
-                            args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
-                            result = execute_tool_call(func_name, args)
+                        # If it wasn't a special component, save raw result
+                        if not is_component:
+                            self.memory.add_message("tool", raw_result, tool_call_id=call_id)
                             
-                            # --- FIX: PASS UI COMPONENTS TO FRONTEND ---
-                            # If the tool returned a special UI packet (like a Diff), yield it now.
-                            if "__axiom_type__" in result:
-                                try:
-                                    # We yield it as a 'component' type so frontend handles it specially
-                                    json_res = json.loads(result)
-                                    yield {"type": "component", "data": json_res}
-                                except: pass
-                            # -------------------------------------------
+                    except Exception as e:
+                        error_msg = f"Tool Execution Error: {str(e)}"
+                        self.memory.add_message("tool", error_msg, tool_call_id=call_id)
 
-                        except Exception as tool_err:
-                            result = f"Tool Error: {str(tool_err)}"
-
-                        self.memory.add_message("tool", result, tool_call_id=call_id)
-
-                else:
-                    self.memory.add_message("assistant", content)
-                    yield {"type": "answer", "content": content}
-                    return
-
-            except Exception as e:
-                logger.error(f"Chat error: {e}")
-                retries += 1
-                time.sleep(1)
-        
-        yield {"type": "error", "content": "Failed to generate response."}
+        except Exception as e:
+            logger.error(f"Chat Loop Error: {e}")
+            yield {"type": "error", "content": str(e)}

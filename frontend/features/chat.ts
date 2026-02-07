@@ -30,25 +30,33 @@ export class ChatFeature implements vscode.WebviewViewProvider {
 
     private async handleUserMessage(prompt: string) {
         if (!this._view) {return;}
+        
         try {
-            // Note: In a real implementation with streaming, we would subscribe to events.
-            // Since client.ts (current version) awaits the full response, 
-            // we rely on the backend formatting the response string or us updating client.ts.
-            // However, with the new agent yielding 'component', the client needs to return it.
-            
-            // Assume client.ts returns the last message or an array of messages.
-            // For now, let's catch the JSON if it appears in the text response as a fallback.
-            
+            // 1. Request to Backend
             const response = await this._client.sendRequest("chat", { prompt });
             
-            // Check if response contains our component data (Client modification needed ideally, 
-            // but we can pass it via the text field if the client just concatenates)
-            
-            if (response.response) {
-                this._view.webview.postMessage({ type: "addResponse", value: response.response });
+            // 2. Render Text (if any)
+            if (response.response && response.response.trim().length > 0) {
+                this._view.webview.postMessage({ 
+                    type: "addText", 
+                    value: response.response 
+                });
             }
+
+            // 3. Render Components (Diffs, etc.)
+            if (response.components && Array.isArray(response.components)) {
+                for (const component of response.components) {
+                    if (component.__axiom_type__ === "diff") {
+                        this._view.webview.postMessage({ 
+                            type: "addDiff", 
+                            value: component 
+                        });
+                    }
+                }
+            }
+
         } catch (e) {
-            this._view.webview.postMessage({ type: "addResponse", value: `Error: ${e}` });
+            this._view.webview.postMessage({ type: "addText", value: `Error: ${e}` });
         }
     }
 
@@ -83,215 +91,92 @@ export class ChatFeature implements vscode.WebviewViewProvider {
     }
 
     private _getHtmlForWebview(webview: vscode.Webview) {
+        // Simplified HTML with robust script handler
         return `<!DOCTYPE html>
         <html lang="en">
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <style>
-                :root {
-                    --bg: var(--vscode-editor-background);
-                    --fg: var(--vscode-editor-foreground);
-                    --input-bg: var(--vscode-input-background);
-                    --border: var(--vscode-widget-border);
-                    --accent: var(--vscode-button-background);
-                    --accent-fg: var(--vscode-button-foreground);
-                }
-                body {
-                    font-family: var(--vscode-font-family);
-                    background: var(--bg); color: var(--fg);
-                    margin: 0; padding: 0;
-                    display: flex; flex-direction: column; height: 100vh;
-                }
-                #chat {
-                    flex: 1; overflow-y: auto; padding: 15px;
-                    display: flex; flex-direction: column; gap: 15px;
-                }
-                .message {
-                    max-width: 90%;
-                    padding: 8px 12px;
-                    border-radius: 6px;
-                    font-size: 13px;
-                    line-height: 1.4;
-                    word-wrap: break-word;
-                }
-                .user {
-                    align-self: flex-end;
-                    background: var(--vscode-button-secondaryBackground);
-                    color: var(--vscode-button-secondaryForeground);
-                }
-                .bot {
-                    align-self: flex-start;
-                    background: var(--vscode-editor-lineHighlightBackground);
-                }
+                /* Reuse your existing CSS styles from the previous upload */
+                body { font-family: var(--vscode-font-family); padding: 10px; color: var(--vscode-editor-foreground); background: var(--vscode-editor-background); }
+                .message { padding: 8px; margin-bottom: 8px; border-radius: 4px; white-space: pre-wrap; }
+                .user { background: var(--vscode-button-secondaryBackground); align-self: flex-end; }
+                .bot { background: var(--vscode-editor-inactiveSelectionBackground); align-self: flex-start; }
+                .diff-card { border: 1px solid var(--vscode-widget-border); margin-top: 10px; border-radius: 4px; overflow: hidden; }
+                .diff-header { padding: 5px; background: var(--vscode-editor-lineHighlightBackground); font-weight: bold; font-size: 0.9em; }
+                .diff-content { padding: 10px; font-family: monospace; white-space: pre; overflow-x: auto; font-size: 0.9em; }
+                .btn { padding: 5px 10px; cursor: pointer; border: none; background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
                 
-                /* DIFF CARD STYLE */
-                .diff-card {
-                    background: var(--bg);
-                    border: 1px solid var(--border);
-                    border-radius: 6px;
-                    margin-top: 10px; overflow: hidden;
-                    width: 100%;
-                }
-                .diff-header {
-                    padding: 6px 10px; background: var(--vscode-editor-lineHighlightBackground);
-                    font-weight: bold; border-bottom: 1px solid var(--border);
-                    font-size: 11px;
-                }
-                .diff-content {
-                    padding: 10px; font-family: 'Courier New', monospace; font-size: 11px;
-                    white-space: pre-wrap; overflow-x: auto;
-                    background: var(--bg);
-                }
-                .ln-add { background: rgba(78, 201, 176, 0.15); display: block; }
-                .ln-rem { background: rgba(241, 76, 76, 0.15); display: block; }
-                
-                .diff-actions {
-                    padding: 8px; display: flex; justify-content: flex-end; gap: 8px;
-                    border-top: 1px solid var(--border); background: var(--vscode-editor-lineHighlightBackground);
-                }
-                .btn {
-                    border: none; padding: 4px 10px; border-radius: 2px; cursor: pointer; font-size: 11px;
-                }
-                .btn-accept { background: var(--accent); color: var(--accent-fg); }
-                .btn-reject { background: var(--vscode-errorForeground); color: white; }
-
-                /* INPUT AREA */
-                .input-container {
-                    padding: 15px; border-top: 1px solid var(--border);
-                    display: flex; flex-direction: column; gap: 8px;
-                }
-                textarea {
-                    width: 100%; background: var(--input-bg); color: var(--fg);
-                    border: 1px solid var(--border); border-radius: 4px;
-                    padding: 8px; font-family: inherit; resize: none;
-                    box-sizing: border-box; outline: none;
-                }
-                textarea:focus { border-color: var(--vscode-focusBorder); }
-                #sendBtn {
-                    align-self: flex-end;
-                    background: var(--accent); color: var(--accent-fg);
-                    border: none; padding: 6px 14px; border-radius: 2px; cursor: pointer;
-                }
-                #sendBtn:hover { opacity: 0.9; }
+                #chat-container { display: flex; flex-direction: column; height: 90vh; overflow-y: auto; padding-bottom: 20px; }
+                #input-area { position: fixed; bottom: 0; left: 0; right: 0; padding: 10px; background: var(--vscode-editor-background); border-top: 1px solid var(--vscode-widget-border); display: flex; }
+                input { flex: 1; padding: 8px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); }
             </style>
         </head>
         <body>
-            <div id="chat"></div>
-            <div class="input-container">
-                <textarea id="promptInput" rows="2" placeholder="Ask Axiom... (Shift+Enter for newline)"></textarea>
-                <button id="sendBtn">Send</button>
+            <div id="chat-container"></div>
+            <div id="input-area">
+                <input id="prompt" type="text" placeholder="Ask Axiom..." />
+                <button class="btn" onclick="send()">Send</button>
             </div>
+
             <script>
                 const vscode = acquireVsCodeApi();
-                const chat = document.getElementById('chat');
-                const input = document.getElementById('promptInput');
-                const btn = document.getElementById('sendBtn');
+                const container = document.getElementById('chat-container');
+                const prompt = document.getElementById('prompt');
 
-                // Auto-resize
-                input.addEventListener('input', function() {
-                    this.style.height = 'auto';
-                    this.style.height = Math.min(this.scrollHeight, 150) + 'px';
+                prompt.addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') send();
                 });
 
-                // Shift+Enter Logic
-                input.addEventListener('keydown', (e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault();
-                        sendMessage();
-                    }
-                });
-
-                btn.addEventListener('click', sendMessage);
-
-                function sendMessage() {
-                    const text = input.value.trim();
-                    if (!text) return;
-                    
+                function send() {
+                    const text = prompt.value;
+                    if(!text) return;
                     addMessage(text, 'user');
                     vscode.postMessage({ type: 'sendMessage', value: text });
-                    input.value = '';
-                    input.style.height = 'auto';
+                    prompt.value = '';
                 }
 
-                function addMessage(text, sender) {
+                function addMessage(text, role) {
                     const div = document.createElement('div');
-                    div.className = 'message ' + sender;
+                    div.className = 'message ' + role;
                     div.innerText = text;
-                    chat.appendChild(div);
-                    chat.scrollTop = chat.scrollHeight;
+                    container.appendChild(div);
+                    container.scrollTop = container.scrollHeight;
                 }
 
                 function addDiff(data) {
-                    const id = 'diff-' + Date.now();
                     const div = document.createElement('div');
                     div.className = 'diff-card';
-                    
-                    let linesHtml = '';
-                    data.diff.split('\\n').forEach(line => {
-                        if(line.startsWith('+++') || line.startsWith('---') || line.startsWith('@@')) return;
-                        let cls = '';
-                        if(line.startsWith('+')) cls = 'ln-add';
-                        if(line.startsWith('-')) cls = 'ln-rem';
-                        linesHtml += '<span class="'+cls+'">' + escapeHtml(line) + '</span>';
-                    });
-
                     div.innerHTML = \`
                         <div class="diff-header">\${data.file}</div>
-                        <div class="diff-content">\${linesHtml}</div>
-                        <div class="diff-actions">
-                            <button class="btn btn-reject" onclick="this.closest('.diff-card').remove()">Reject</button>
-                            <button class="btn btn-accept" id="\${id}">Accept</button>
+                        <div class="diff-content">\${escapeHtml(data.diff)}</div>
+                        <div style="padding:5px; text-align:right;">
+                            <button class="btn" onclick="applyDiff(this, '\${data.file}', '\${escapeJs(data.search)}', '\${escapeJs(data.replace)}')">Apply Edit</button>
                         </div>
                     \`;
-                    
-                    chat.appendChild(div);
-                    chat.scrollTop = chat.scrollHeight;
-
-                    document.getElementById(id).onclick = function() {
-                        this.innerText = 'Applying...';
-                        this.disabled = true;
-                        vscode.postMessage({
-                            type: 'applyEdit',
-                            file: data.file,
-                            search: data.search,
-                            replace: data.replace,
-                            id: id
-                        });
-                    };
+                    container.appendChild(div);
+                    container.scrollTop = container.scrollHeight;
                 }
-
+                
                 function escapeHtml(text) {
                     return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+                }
+                
+                function escapeJs(text) {
+                     return text.replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'");
+                }
+
+                function applyDiff(btn, file, search, replace) {
+                    btn.innerText = 'Applying...';
+                    const id = 'btn-' + Date.now();
+                    vscode.postMessage({ type: 'applyEdit', file, search, replace, id });
                 }
 
                 window.addEventListener('message', event => {
                     const msg = event.data;
-                    
-                    if (msg.type === 'addResponse') {
-                        // 1. Try to find the JSON blob in the text (Leak Fix)
-                        const jsonMatch = msg.value.match(/\\{.*"__axiom_type__":\\s*"diff".*\\}/s);
-                        
-                        if (jsonMatch) {
-                            try {
-                                const json = JSON.parse(jsonMatch[0]);
-                                addDiff(json);
-                                // Don't show the raw JSON text
-                                return;
-                            } catch(e) { console.error(e); }
-                        }
-
-                        // 2. Normal Text
-                        addMessage(msg.value, 'bot');
-                    }
-                    
-                    if (msg.type === 'editApplied') {
-                        const btn = document.getElementById(msg.id);
-                        if (btn) {
-                            btn.innerText = 'Applied';
-                            btn.style.opacity = '0.7';
-                        }
-                    }
+                    if (msg.type === 'addText') addMessage(msg.value, 'bot');
+                    if (msg.type === 'addDiff') addDiff(msg.value);
                 });
             </script>
         </body>
