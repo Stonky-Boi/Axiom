@@ -133,14 +133,29 @@ async def process_chat(request: ChatRequest):
     # 1. Build the system prompt with context
     system_prompt = (
         "You are Axiom, an expert local AI coding assistant.\n"
+        "You have a tool to edit files. You MUST use it when the user asks for code changes.\n"
+        "\n"
+        "--- CRITICAL TOOL USE INSTRUCTIONS ---\n"
+        "When the user asks to refactor, fix, or update code, you MUST output the code wrapped in these specific tags:\n"
+        "\n"
+        "<<<UPDATE_FILE>>>\n"
+        "[Put the full file content here]\n"
+        "<<<END_UPDATE>>>\n"
+        "\n"
+        "Example Response:\n"
+        "I have updated the file to include the print statement.\n"
+        "<<<UPDATE_FILE>>>\n"
+        "#include <iostream>\n"
+        "int main() {\n"
+        "    std::cout << \"Hello World\";\n"
+        "    return 0;\n"
+        "}\n"
+        "<<<END_UPDATE>>>\n"
+        "\n"
         "RULES:\n"
-        "1. Read the provided 'Active File Content' carefully before answering.\n"
-        "2. If you want to modify the code, do NOT just output the code.\n"
-        "3. Use the following format to propose changes:\n"
-        "   <<<UPDATE_FILE>>>\n"
-        "   [The complete new code block]\n"
-        "   <<<END_UPDATE>>>\n"
-        "4. Be concise and accurate. Use snake case.\n\n"
+        "1. Do NOT use standard markdown code blocks (```cpp) for file updates. Use the <<<TAGS>>>.\n"
+        "2. Provide the COMPLETE file content inside the tags, not just a snippet.\n"
+        "3. Use snake_case naming.\n\n"
     )
 
     if request.active_file_path:
@@ -178,17 +193,28 @@ async def process_chat(request: ChatRequest):
 
     # 2. Format messages for the Ollama Chat API
     formatted_messages = [{"role": "system", "content": system_prompt}]
+    
     for msg in request.messages:
-        formatted_messages.append({"role": msg.role, "content": msg.content})
+        content = msg.content
+        
+        # Forcefully remind the model at the end of every user turn
+        if msg.role == "user":
+            content += (
+                "\n\nIMPORTANT: If you write any code, you MUST wrap it in "
+                "<<<UPDATE_FILE>>> and <<<END_UPDATE>>> tags. "
+                "Do NOT use standard markdown blocks."
+            )
+            
+        formatted_messages.append({"role": msg.role, "content": content})
 
     try:
         response = await ollama_client.chat(
-            model=chat_model_name, # Using the 3b model for reasoning
+            model=chat_model_name,
             messages=formatted_messages,
             keep_alive=-1,
             options={
-                "temperature": 0.2, # Slightly higher than autocomplete for reasoning
-                "num_predict": 1024  # Allow longer responses for refactoring
+                "temperature": 0.1, # Lower temperature = stricter adherence to rules
+                "num_predict": 1024
             }
         )
 

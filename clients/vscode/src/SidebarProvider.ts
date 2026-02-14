@@ -1,15 +1,20 @@
 import * as vscode from "vscode";
-import * as ChangeDiff from "diff";
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
   _view?: vscode.WebviewView;
+  // Keep track of the pending proposal so we can accept/reject it
+  private _pendingCode: string = "";
+  private _tempUri: vscode.Uri | undefined;
 
   constructor(private readonly _extensionUri: vscode.Uri) {}
 
   public resolveWebviewView(
     webviewView: vscode.WebviewView,
     context: vscode.WebviewViewResolveContext,
-    _token: vscode.CancellationToken
+    _token: vscode.CancellationToken,
   ) {
     this._view = webviewView;
 
@@ -20,7 +25,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
 
-    // Listen for messages from the UI
     webviewView.webview.onDidReceiveMessage(async (data) => {
       switch (data.type) {
         case "onInfo": {
@@ -37,130 +41,166 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           vscode.window.showErrorMessage(data.value);
           break;
         }
-        // Case 1: Simple Insertion
-        case "insert_code": {
-            const editor = vscode.window.activeTextEditor;
-            if (!editor) {
-                vscode.window.showErrorMessage("No active editor found.");
-                return;
-            }
-            editor.edit(editBuilder => {
-                editBuilder.insert(editor.selection.active, data.value);
-            });
-            break;
+
+        // --- 1. Show the Diff (Visual Compare) ---
+        case "review_changes": {
+          const editor = vscode.window.activeTextEditor;
+          if (!editor) {
+            vscode.window.showErrorMessage("No active editor found.");
+            return;
+          }
+
+          // Save the proposed code to a temporary file
+          this._pendingCode = data.value;
+          const tempDir = os.tmpdir();
+          const tempFilePath = path.join(
+            tempDir,
+            "axiom_proposal" + path.extname(editor.document.fileName),
+          );
+          fs.writeFileSync(tempFilePath, this._pendingCode);
+
+          this._tempUri = vscode.Uri.file(tempFilePath);
+          const currentUri = editor.document.uri;
+
+          // Open VS Code's Native Diff Editor
+          await vscode.commands.executeCommand(
+            "vscode.diff",
+            currentUri,
+            this._tempUri,
+            "Current File ↔ Axiom Proposal",
+          );
+          break;
         }
-        // Case 2: Full File Update (Agentic Diff)
-        case "update_file": {
-            const editor = vscode.window.activeTextEditor;
-            if (!editor) {
-                vscode.window.showErrorMessage("No active editor found.");
-                return;
-            }
-            const fullRange = new vscode.Range(
-                editor.document.positionAt(0),
-                editor.document.positionAt(editor.document.getText().length)
+
+        // --- 2. Accept Changes (Overwrite File) ---
+        case "accept_changes": {
+          const editor = vscode.window.activeTextEditor;
+          // We might be focused on the Diff editor, so find the original document
+          const originalDoc = vscode.workspace.textDocuments.find(
+            (doc) =>
+              doc.uri.scheme === "file" &&
+              doc.fileName !== this._tempUri?.fsPath,
+          );
+
+          if (!originalDoc || !this._pendingCode) {
+            vscode.window.showErrorMessage(
+              "Could not apply changes. Session lost.",
             );
-            editor.edit(editBuilder => {
-                editBuilder.replace(fullRange, data.value);
-            });
-            break;
+            return;
+          }
+
+          // Write to the actual file
+          const fullRange = new vscode.Range(
+            originalDoc.positionAt(0),
+            originalDoc.positionAt(originalDoc.getText().length),
+          );
+
+          const edit = new vscode.WorkspaceEdit();
+          edit.replace(originalDoc.uri, fullRange, this._pendingCode);
+          await vscode.workspace.applyEdit(edit);
+
+          // Clean up: Close the diff view and info message
+          vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+          vscode.window.showInformationMessage("Changes applied successfully!");
+
+          // Send message back to UI to hide buttons
+          webviewView.webview.postMessage({ type: "changes_applied" });
+          break;
         }
+
+        // --- 3. Reject Changes ---
+        case "reject_changes": {
+          // Just close the Diff view
+          vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+          this._pendingCode = "";
+          webviewView.webview.postMessage({ type: "changes_rejected" });
+          break;
+        }
+
+        // --- Standard Chat Logic ---
         case "ask_axiom": {
-            // 1. Gather Context
-            let editor = vscode.window.activeTextEditor;
-            if (!editor) {
-                const visible = vscode.window.visibleTextEditors;
-                if (visible.length > 0) {
-                    editor = visible[0];
-                }
+          let editor = vscode.window.activeTextEditor;
+          if (!editor) {
+            const visible = vscode.window.visibleTextEditors;
+            if (visible.length > 0) {
+              editor = visible[0];
             }
+          }
 
-            let workspace_root = "";
-            let active_file_path = "";
-            let active_file_content = "";
-            let selected_text = "";
+          let workspace_root = "";
+          let active_file_path = "";
+          let active_file_content = "";
 
-            if (vscode.workspace.workspaceFolders) {
-                workspace_root = vscode.workspace.workspaceFolders[0].uri.fsPath;
+          if (vscode.workspace.workspaceFolders) {
+            workspace_root = vscode.workspace.workspaceFolders[0].uri.fsPath;
+          }
+
+          if (editor) {
+            active_file_path = editor.document.fileName;
+            active_file_content = editor.document.getText();
+          }
+
+          try {
+            const response = await fetch("http://127.0.0.1:8000/chat", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                messages: [{ role: "user", content: data.value }],
+                workspace_root: workspace_root,
+                active_file_path: active_file_path,
+                active_file_content: active_file_content,
+                selected_text: "", // Simplified for full-file mode
+              }),
+            });
+
+            if (!response.ok) {
+              throw new Error(`HTTP Error: ${response.status}`);
             }
+            const result = (await response.json()) as { reply: string };
 
-            if (editor) {
-                active_file_path = editor.document.fileName;
-                active_file_content = editor.document.getText();
-                if (!editor.selection.isEmpty) {
-                    selected_text = editor.document.getText(editor.selection);
-                }
-            }
+            // Parse for <<<UPDATE_FILE>>>
+            const agentRegex =
+              /<<<UPDATE_FILE>>>\s*([\s\S]*?)\s*<<<END_UPDATE>>>/;
+            const match = agentRegex.exec(result.reply);
 
-            // 2. Send to Python Backend
-            try {
-                const response = await fetch("http://127.0.0.1:8000/chat", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        messages: [{ role: "user", content: data.value }],
-                        workspace_root: workspace_root,
-                        active_file_path: active_file_path,
-                        active_file_content: active_file_content,
-                        selected_text: selected_text
-                    }),
-                });
+            if (match) {
+              const cleanCode = match[1];
+              // Remove the code block from the explanation text to avoid clutter
+              const explanation = result.reply.replace(agentRegex, "").trim();
 
-                if (!response.ok) {
-                    throw new Error(`HTTP Error: ${response.status}`);
-                }
+              webviewView.webview.postMessage({
+                type: "propose_changes",
+                explanation:
+                  explanation || "I have generated a new version of this file.",
+                code: cleanCode,
+              });
+            } else {
+              const fallbackRegex = /```[\s\S]*?\n([\s\S]*?)```/;
+              const fallbackMatch = fallbackRegex.exec(result.reply);
 
-                const result = await response.json() as { reply: string };
-                
-                // 3. Process Response for Agentic Tools
-                const agentRegex = /<<<UPDATE_FILE>>>\s*([\s\S]*?)\s*<<<END_UPDATE>>>/;
-                const match = agentRegex.exec(result.reply);
-                
-                let diffHtml = "";
-                let cleanCode = "";
-
-                if (match) {
-                    cleanCode = match[1];
-                    if (active_file_content) {
-                        const diff = ChangeDiff.diffLines(active_file_content, cleanCode);
-                        
-                        diff.forEach((part: ChangeDiff.Change) => {
-                            const color = part.added ? 'rgba(40, 167, 69, 0.2)' :
-                                          part.removed ? 'rgba(220, 53, 69, 0.2)' : 'transparent';
-                            const prefix = part.added ? '+ ' : part.removed ? '- ' : '  ';
-                            
-                            const escapedValue = part.value
-                                .replace(/&/g, "&amp;")
-                                .replace(/</g, "&lt;")
-                                .replace(/>/g, "&gt;");
-                            
-                            diffHtml += `<span style="background-color: ${color}; display: block; white-space: pre-wrap;">${prefix}${escapedValue}</span>`;
-                        });
-                    }
-                } 
-                else {
-                    const fallbackRegex = /```[\s\S]*?\n([\s\S]*?)```/;
-                    const fallbackMatch = fallbackRegex.exec(result.reply);
-                    if (fallbackMatch) {
-                        cleanCode = fallbackMatch[1];
-                    }
-                }
-
-                // 4. Send Result + Diff to UI
+              if (fallbackMatch) {
+                // FIX: Added 'const' here
+                const cleanCode = fallbackMatch[1];
                 webviewView.webview.postMessage({
-                    type: "add_response",
-                    value: result.reply,
-                    diff: diffHtml,
-                    code: cleanCode
+                  type: "propose_changes", // FORCE the Diff UI even for markdown
+                  explanation: result.reply.replace(fallbackRegex, "").trim(),
+                  code: cleanCode,
                 });
-
-            } catch (error: any) {
+              } else {
+                // Only strictly text responses go here
                 webviewView.webview.postMessage({
-                    type: "add_response",
-                    value: `Error connecting to Axiom: ${error.message}`,
+                  type: "add_response",
+                  value: result.reply,
                 });
+              }
             }
-            break;
+          } catch (error: any) {
+            webviewView.webview.postMessage({
+              type: "add_response",
+              value: `Error: ${error.message}`,
+            });
+          }
+          break;
         }
       }
     });
@@ -176,24 +216,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         body { font-family: var(--vscode-font-family); padding: 10px; color: var(--vscode-editor-foreground); }
         .chat-box { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }
         .user-msg { align-self: flex-end; background: var(--vscode-button-background); color: var(--vscode-button-foreground); padding: 8px; border-radius: 5px; max-width: 80%; }
-        .axiom-msg { align-self: flex-start; background: var(--vscode-editor-inactiveSelectionBackground); padding: 8px; border-radius: 5px; max-width: 90%; white-space: pre-wrap; overflow-x: auto;}
+        .axiom-msg { align-self: flex-start; background: var(--vscode-editor-inactiveSelectionBackground); padding: 8px; border-radius: 5px; max-width: 90%; white-space: pre-wrap; }
         
-        pre { background: #1e1e1e; padding: 10px; border-radius: 4px; position: relative; }
-        code { font-family: 'Courier New', Courier, monospace; }
-        
-        .apply-btn {
-            display: block;
-            margin-top: 5px;
-            padding: 6px 10px;
-            background: var(--vscode-button-secondaryBackground);
-            color: var(--vscode-button-secondaryForeground);
-            border: none;
-            cursor: pointer;
-            font-size: 0.9em;
-            border-radius: 3px;
-            font-weight: bold;
+        .action-container { 
+            display: flex; gap: 10px; margin-top: 5px; 
+            background: rgba(0,0,0,0.2); padding: 10px; border-radius: 5px;
         }
-        .apply-btn:hover { background: var(--vscode-button-secondaryHoverBackground); }
+        button {
+            border: none; padding: 6px 12px; cursor: pointer; border-radius: 3px; font-weight: bold;
+        }
+        .btn-review { background: #007acc; color: white; }
+        .btn-accept { background: #28a745; color: white; }
+        .btn-reject { background: #dc3545; color: white; }
         
         input { width: 100%; padding: 10px; box-sizing: border-box; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); }
       </style>
@@ -207,53 +241,57 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const chatBox = document.getElementById('chat-box');
         const input = document.getElementById('prompt-input');
 
-        function formatResponse(text) {
+        function appendMessage(text, isUser) {
             const div = document.createElement('div');
-            div.className = 'axiom-msg';
-            
-            const codeBlockRegex = /\`\`\`([\\s\\S]*?)\`\`\`/g;
-            let lastIndex = 0;
-            let match;
-            
-            while ((match = codeBlockRegex.exec(text)) !== null) {
-                const beforeCode = text.substring(lastIndex, match.index);
-                if (beforeCode) div.appendChild(document.createTextNode(beforeCode));
-                
-                let codeContent = match[1];
-                if (codeContent.includes('\\n')) {
-                    codeContent = codeContent.substring(codeContent.indexOf('\\n') + 1);
-                }
+            div.className = isUser ? 'user-msg' : 'axiom-msg';
+            div.innerText = text;
+            chatBox.appendChild(div);
+        }
 
-                const pre = document.createElement('pre');
-                pre.textContent = codeContent;
-                
-                const btn = document.createElement('button');
-                btn.className = 'apply-btn';
-                btn.innerText = 'Insert at Cursor';
-                (function(capturedCode) {
-                    btn.onclick = () => {
-                        vscode.postMessage({ type: 'insert_code', value: capturedCode });
-                    };
-                })(codeContent);
-                
-                div.appendChild(pre);
-                div.appendChild(btn);
-                lastIndex = match.index + match[0].length;
-            }
+        // Render the Review/Accept/Reject Controls
+        function renderProposal(explanation, code) {
+            appendMessage(explanation, false); // Show text first
             
-            const remaining = text.substring(lastIndex);
-            if (remaining) div.appendChild(document.createTextNode(remaining));
-            return div;
+            const container = document.createElement('div');
+            container.className = 'action-container';
+            
+            const btnReview = document.createElement('button');
+            btnReview.className = 'btn-review';
+            btnReview.innerText = 'Review Changes';
+            btnReview.onclick = () => {
+                vscode.postMessage({ type: 'review_changes', value: code });
+            };
+
+            const btnAccept = document.createElement('button');
+            btnAccept.className = 'btn-accept';
+            btnAccept.innerText = '✓ Accept';
+            btnAccept.onclick = () => {
+                vscode.postMessage({ type: 'accept_changes' });
+                container.innerHTML = "<em>Changes Accepted</em>";
+            };
+
+            const btnReject = document.createElement('button');
+            btnReject.className = 'btn-reject';
+            btnReject.innerText = '✕ Reject';
+            btnReject.onclick = () => {
+                vscode.postMessage({ type: 'reject_changes' });
+                container.innerHTML = "<em>Changes Rejected</em>";
+            };
+
+            container.appendChild(btnReview);
+            container.appendChild(btnAccept);
+            container.appendChild(btnReject);
+            chatBox.appendChild(container);
+            
+            // Automatically trigger the Diff view for better UX
+            vscode.postMessage({ type: 'review_changes', value: code });
         }
 
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && input.value) {
                 const text = input.value;
                 input.value = '';
-                const userDiv = document.createElement('div');
-                userDiv.className = 'user-msg';
-                userDiv.innerText = text;
-                chatBox.appendChild(userDiv);
+                appendMessage(text, true);
                 vscode.postMessage({ type: 'ask_axiom', value: text });
             }
         });
@@ -262,32 +300,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const message = event.data;
             switch (message.type) {
                 case 'add_response':
-                    if (message.diff) {
-                        const div = document.createElement('div');
-                        div.className = 'axiom-msg';
-                        
-                        const header = document.createElement('div');
-                        header.innerHTML = "<strong>Proposed Changes:</strong>";
-                        header.style.marginBottom = "5px";
-                        div.appendChild(header);
-
-                        const pre = document.createElement('pre');
-                        pre.innerHTML = message.diff; 
-                        div.appendChild(pre);
-                        
-                        const btn = document.createElement('button');
-                        btn.className = 'apply-btn';
-                        btn.innerText = 'Accept Changes';
-                        btn.onclick = () => {
-                            vscode.postMessage({ type: 'update_file', value: message.code });
-                        };
-                        div.appendChild(btn);
-                        
-                        chatBox.appendChild(div);
-                    } else {
-                        const msgDiv = formatResponse(message.value);
-                        chatBox.appendChild(msgDiv);
-                    }
+                    appendMessage(message.value, false);
+                    break;
+                case 'propose_changes':
+                    renderProposal(message.explanation, message.code);
                     break;
             }
         });
