@@ -111,6 +111,96 @@ async def get_autocomplete(request: AutocompleteRequest):
             status_code=500, 
             detail=f"Autocomplete inference failed. Details: {str(error)}"
         )
+    
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+class ChatRequest(BaseModel):
+    messages: list[ChatMessage]
+    workspace_root: str
+    active_file_path: str
+    active_file_content: str = ""
+    selected_text: str
+
+class ChatResponse(BaseModel):
+    reply: str
+
+@app.post("/chat", response_model=ChatResponse)
+async def process_chat(request: ChatRequest):
+    ollama_client = AsyncClient(host="http://localhost:11434")
+
+    # 1. Build the system prompt with context
+    system_prompt = (
+        "You are Axiom, an expert local AI coding assistant.\n"
+        "RULES:\n"
+        "1. Read the provided 'Active File Content' carefully before answering.\n"
+        "2. If you want to modify the code, do NOT just output the code.\n"
+        "3. Use the following format to propose changes:\n"
+        "   <<<UPDATE_FILE>>>\n"
+        "   [The complete new code block]\n"
+        "   <<<END_UPDATE>>>\n"
+        "4. Be concise and accurate. Use snake case.\n\n"
+    )
+
+    if request.active_file_path:
+        # Check if we have a workspace root to calculate relative path
+        if request.workspace_root and os.path.exists(request.workspace_root):
+            try:
+                display_path = os.path.relpath(request.active_file_path, request.workspace_root)
+            except ValueError:
+                display_path = os.path.basename(request.active_file_path)
+        else:
+            display_path = os.path.basename(request.active_file_path)
+            
+        system_prompt += f"Active File: {display_path}\n"
+
+    # If the user has highlighted specific code, prioritize that context
+    if request.selected_text:
+        system_prompt += f"Selected Code:\n```\n{request.selected_text}\n```\n"
+    else:
+        # Otherwise, grab the multi-file skeleton context
+        workspace_context = get_workspace_context(request.workspace_root, request.active_file_path)
+        if workspace_context:
+            system_prompt += f"Workspace Context:\n{workspace_context}\n"
+
+    if request.active_file_content:
+        # If user highlighted text, we focus on that, but we still provide the full file as reference
+        if request.selected_text:
+            system_prompt += f"\n--- FULL CONTENT OF {display_path} (For Reference) ---\n"
+            system_prompt += request.active_file_content
+            system_prompt += "\n\n--- USER SELECTED CODE ---\n"
+            system_prompt += request.selected_text
+        else:
+            system_prompt += f"\n--- ACTIVE FILE CONTENT: {display_path} ---\n"
+            system_prompt += request.active_file_content
+            system_prompt += "\n--------------------------------------------\n"
+
+    # 2. Format messages for the Ollama Chat API
+    formatted_messages = [{"role": "system", "content": system_prompt}]
+    for msg in request.messages:
+        formatted_messages.append({"role": msg.role, "content": msg.content})
+
+    try:
+        response = await ollama_client.chat(
+            model=chat_model_name, # Using the 3b model for reasoning
+            messages=formatted_messages,
+            keep_alive=-1,
+            options={
+                "temperature": 0.2, # Slightly higher than autocomplete for reasoning
+                "num_predict": 1024  # Allow longer responses for refactoring
+            }
+        )
+
+        reply_content = response["message"]["content"]
+        return ChatResponse(reply=reply_content)
+
+    except Exception as error:
+        print(f"\n[CRITICAL ERROR] Chat inference failed: {str(error)}\n")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Chat inference failed. Details: {str(error)}"
+        )
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)

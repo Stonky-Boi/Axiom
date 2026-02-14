@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { SidebarProvider } from "./SidebarProvider";
 
 // Global variables to track the active timer and network request
 let debounce_timer: NodeJS.Timeout | null = null;
@@ -7,6 +8,11 @@ let current_abort_controller: AbortController | null = null;
 export function activate(context: vscode.ExtensionContext) {
     vscode.window.showInformationMessage("Axiom is now active and listening.");
 
+    const sidebarProvider = new SidebarProvider(context.extensionUri);
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider("axiom.chatView", sidebarProvider)
+    );
+    
     const inline_completion_provider = {
         provideInlineCompletionItems: async function(
             document: vscode.TextDocument,

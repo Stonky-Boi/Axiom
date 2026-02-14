@@ -84,8 +84,9 @@ def get_workspace_context(workspace_root: str, current_file_path: str) -> str:
                     file_signatures = parse_cpp_signatures(file_content)
 
                 if len(file_signatures) > 0:
-                    file_basename = os.path.basename(file_path)
-                    skeleton_context.append(f"// File: {file_basename}")
+                    # Use relative path so the model sees "test/l1q1.cpp" instead of just "l1q1.cpp"
+                    rel_path = os.path.relpath(file_path, workspace_root)
+                    skeleton_context.append(f"// File: {rel_path}")
                     skeleton_context.extend(file_signatures)
 
             except Exception as error:
